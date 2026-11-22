@@ -1,8 +1,10 @@
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { normalizeRecordId } from "./recordUtils.js";
+import { supabase, supabaseConfigError } from "./supabase.js";
 
 const FIELD_KEYS = ["id", "name", "address", "phoneNumber", "comments"];
+const DATABASE_FIELDS = "id,name,address,phone_number,comments";
 const COLUMNS = [
   ["id", "ID"],
   ["name", "Name"],
@@ -20,29 +22,34 @@ const HEADER_ALIASES = new Map([
   ["comment", "comments"],
 ]);
 
-async function apiRequest(endpoint, password, options = {}) {
-  let response;
-  try {
-    const headers = new Headers(options.headers);
-    if (options.body) headers.set("Content-Type", "application/json");
-    if (password) headers.set("Authorization", ["Bearer", password].join(" "));
-    response = await fetch(endpoint, {
-      ...options,
-      headers,
-      body: options.body ? JSON.stringify(options.body) : undefined,
-    });
-  } catch {
-    throw new Error("Could not reach the records server. Check your connection and try again.");
-  }
+function toDatabaseRecord(record) {
+  return {
+    id: record.id,
+    name: record.name,
+    address: record.address,
+    phone_number: record.phoneNumber,
+    comments: record.comments,
+  };
+}
 
-  const contentType = response.headers.get("content-type") ?? "";
-  const result = contentType.includes("application/json")
-    ? await response.json()
-    : null;
-  if (!response.ok) {
-    throw new Error(result?.error ?? `Request failed (${response.status}).`);
+function fromDatabaseRecord(record) {
+  return {
+    id: record.id,
+    name: record.name,
+    address: record.address,
+    phoneNumber: record.phone_number,
+    comments: record.comments,
+  };
+}
+
+function getDatabaseErrorMessage(error, fallback) {
+  if (error?.code === "23505") {
+    return `A record with ID "${error.details ?? "the entered ID"}" already exists.`;
   }
-  return result;
+  if (error?.code === "PGRST202" || error?.code === "42883") {
+    return "The import function is missing. Run supabase/schema.sql in the Supabase SQL Editor.";
+  }
+  return error instanceof Error ? error.message : fallback;
 }
 
 function normalizeHeader(value) {
@@ -121,10 +128,10 @@ function formatImportStatus(addedRecords, duplicateIds, skippedMissingId) {
 function App() {
   const [records, setRecords] = useState([]);
   const [status, setStatus] = useState({ message: "", state: "success" });
-  const [password, setPassword] = useState("");
+  const [user, setUser] = useState(null);
+  const [emailInput, setEmailInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoadingRecords, setIsLoadingRecords] = useState(false);
+  const [isLoadingRecords, setIsLoadingRecords] = useState(true);
   const [file, setFile] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
   const [query, setQuery] = useState("");
@@ -132,6 +139,72 @@ function App() {
   const [activeModule, setActiveModule] = useState("records");
   const [editingRecord, setEditingRecord] = useState(null);
   const [isAddingRecord, setIsAddingRecord] = useState(false);
+  const isAuthenticated = Boolean(user);
+
+  useEffect(() => {
+    if (!supabase) {
+      setStatus({ message: supabaseConfigError, state: "error" });
+      setIsLoadingRecords(false);
+      return undefined;
+    }
+
+    let active = true;
+    async function restoreSession() {
+      setIsLoadingRecords(true);
+      const { data, error } = await supabase.auth.getSession();
+      if (!active) return;
+      if (error) {
+        setStatus({ message: error.message, state: "error" });
+      } else if (data.session?.user) {
+        setUser(data.session.user);
+        await loadRecords(() => active);
+      }
+      if (active) setIsLoadingRecords(false);
+    }
+
+    restoreSession().catch((error) => {
+      if (!active) return;
+      setStatus({
+        message: getDatabaseErrorMessage(error, "Could not restore your session."),
+        state: "error",
+      });
+      setIsLoadingRecords(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_OUT") {
+        setUser(null);
+        setRecords([]);
+      } else if (session?.user) {
+        setUser(session.user);
+      }
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  async function loadRecords(isActive = () => true) {
+    const pageSize = 1000;
+    const allRecords = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const { data, error } = await supabase
+        .from("contact_records")
+        .select(DATABASE_FIELDS)
+        .order("id", { ascending: true })
+        .range(offset, offset + pageSize - 1);
+      if (error) throw error;
+
+      allRecords.push(...data.map(fromDatabaseRecord));
+      if (data.length < pageSize) break;
+    }
+    if (isActive()) setRecords(allRecords);
+    return allRecords;
+  }
 
   const filteredRecords = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -149,19 +222,20 @@ function App() {
     event.preventDefault();
     setIsLoadingRecords(true);
     try {
-      await apiRequest("/api/auth", "", {
-        method: "POST",
-        body: { password: passwordInput },
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: emailInput.trim(),
+        password: passwordInput,
       });
-      const result = await apiRequest("/api/records", passwordInput);
-      setRecords(result.records);
-      setPassword(passwordInput);
-      setIsAuthenticated(true);
+      if (error) throw error;
+      if (!data.user) throw new Error("Supabase did not return a signed-in user.");
+      setUser(data.user);
+      await loadRecords();
+      setEmailInput("");
       setPasswordInput("");
       setStatus({ message: "", state: "success" });
     } catch (error) {
       setStatus({
-        message: error instanceof Error ? error.message : "Could not load records.",
+        message: getDatabaseErrorMessage(error, "Could not sign in."),
         state: "error",
       });
     } finally {
@@ -190,25 +264,28 @@ function App() {
         workbook.Sheets[firstSheetName],
         XLSX,
       );
-      const result = await apiRequest("/api/records/import", password, {
-        method: "POST",
-        body: { records: imported },
+      const { data, error } = await supabase.rpc("import_contact_records", {
+        input_records: imported.map(toDatabaseRecord),
       });
-      setRecords(result.records);
+      if (error) throw error;
+      const result = data?.[0] ?? { added_records: [], duplicate_ids: [] };
+      const addedRecords = result.added_records ?? [];
+      const duplicateIds = result.duplicate_ids ?? [];
+      await loadRecords();
 
       setStatus({
         message: formatImportStatus(
-          result.addedRecords,
-          result.duplicateIds,
+          addedRecords,
+          duplicateIds,
           skippedMissingId,
         ),
-        state: result.duplicateIds.length || skippedMissingId ? "warning" : "success",
+        state: duplicateIds.length || skippedMissingId ? "warning" : "success",
       });
       setFile(null);
       form.reset();
     } catch (error) {
       setStatus({
-        message: `Import failed: ${error instanceof Error ? error.message : "The file could not be read."}`,
+        message: `Import failed: ${getDatabaseErrorMessage(error, "The file could not be read.")}`,
         state: "error",
       });
     } finally {
@@ -249,23 +326,20 @@ function App() {
     }
 
     try {
-      const result = editingRecord
-        ? await apiRequest(
-            `/api/records/${encodeURIComponent(editingRecord.record.id)}`,
-            password,
-            { method: "PUT", body: record },
-          )
-        : await apiRequest("/api/records", password, {
-            method: "POST",
-            body: record,
-          });
-      setRecords(result.records);
+      const request = supabase.from("contact_records");
+      const { error } = editingRecord
+        ? await request
+            .update(toDatabaseRecord(record))
+            .eq("id", editingRecord.record.id)
+        : await request.insert({ ...toDatabaseRecord(record), owner_id: user.id });
+      if (error) throw error;
+      await loadRecords();
       setEditingRecord(null);
       setIsAddingRecord(false);
       setStatus({ message: "", state: "success" });
     } catch (error) {
       setStatus({
-        message: error instanceof Error ? error.message : "Could not save the record.",
+        message: getDatabaseErrorMessage(error, "Could not save the record."),
         state: "error",
       });
     }
@@ -274,16 +348,34 @@ function App() {
   async function handleDelete(id) {
     if (!window.confirm("Delete this record? This cannot be undone.")) return;
     try {
-      const result = await apiRequest(
-        `/api/records/${encodeURIComponent(id)}`,
-        password,
-        { method: "DELETE" },
-      );
-      setRecords(result.records);
+      const { data, error } = await supabase
+        .from("contact_records")
+        .delete()
+        .eq("id", id)
+        .select("id");
+      if (error) throw error;
+      if (!data.length) {
+        throw new Error("Record not found or you do not have permission to delete it.");
+      }
+      await loadRecords();
       setStatus({ message: "", state: "success" });
     } catch (error) {
       setStatus({
-        message: error instanceof Error ? error.message : "Could not delete the record.",
+        message: getDatabaseErrorMessage(error, "Could not delete the record."),
+        state: "error",
+      });
+    }
+  }
+
+  async function handleSignOut() {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      setRecords([]);
+      setUser(null);
+    } catch (error) {
+      setStatus({
+        message: getDatabaseErrorMessage(error, "Could not sign out."),
         state: "error",
       });
     }
@@ -295,21 +387,36 @@ function App() {
         <section className="panel auth-panel">
           <p className="eyebrow">PRIVATE WORKSPACE</p>
           <h1>Contact records</h1>
-          <p className="intro">Enter your app password to access your saved records.</p>
+          <p className="intro">Sign in with your Supabase account to access your saved records.</p>
           <form className="auth-form" onSubmit={handleLogin}>
-            <label className="form-field" htmlFor="app-password">
-              App password
+            <label className="form-field" htmlFor="login-email">
+              Email
+              <input
+                autoComplete="username"
+                id="login-email"
+                type="email"
+                value={emailInput}
+                onChange={(event) => setEmailInput(event.target.value)}
+                required
+              />
+            </label>
+            <label className="form-field" htmlFor="login-password">
+              Password
               <input
                 autoComplete="current-password"
-                id="app-password"
+                id="login-password"
                 type="password"
                 value={passwordInput}
                 onChange={(event) => setPasswordInput(event.target.value)}
                 required
               />
             </label>
-            <button className="button button-primary" type="submit" disabled={isLoadingRecords}>
-              {isLoadingRecords ? "Connecting..." : "Open records"}
+            <button
+              className="button button-primary"
+              type="submit"
+              disabled={isLoadingRecords || !supabase}
+            >
+              {isLoadingRecords ? "Connecting..." : "Sign in"}
             </button>
           </form>
           {status.message && (
@@ -326,7 +433,7 @@ function App() {
     <main className="page">
       <header className="page-header">
         <div>
-          <p className="eyebrow">LOCAL JSON WORKSPACE</p>
+          <p className="eyebrow">PRIVATE CONTACT WORKSPACE</p>
           <h1>Contact records</h1>
           <p className="intro">Import an Excel sheet, then find the records you need.</p>
         </div>
@@ -344,11 +451,7 @@ function App() {
           </button>
           <button
             className="button button-secondary"
-            onClick={() => {
-              setPassword("");
-              setRecords([]);
-              setIsAuthenticated(false);
-            }}
+            onClick={handleSignOut}
             type="button"
           >
             Sign out
@@ -419,7 +522,7 @@ function App() {
           <div className="upload-note">
             <span aria-hidden="true">i</span>
             <span>
-              Imported records are added to the shared JSON file on the server.
+              Imported records are saved to the shared Supabase database.
             </span>
           </div>
         </section>
@@ -533,7 +636,7 @@ function App() {
             )}
           </div>
           <p className="storage-note">
-            Records are stored in the shared JSON file on the server&apos;s persistent disk.
+            Records are stored in your Supabase database and shared across your devices.
           </p>
           {status.message && (
             <p className="status" data-state={status.state} role="status" aria-live="polite">

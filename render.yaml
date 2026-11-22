@@ -1,18 +1,11 @@
 services:
   - type: web
     name: contact-records
-    runtime: node
-    plan: starter
+    runtime: static
     buildCommand: npm install && npm run build
-    startCommand: npm start
-    disk:
-      name: contact-records-data
-      mountPath: /var/data
-      sizeGB: 1
+    staticPublishPath: ./dist
     envVars:
-      - key: NODE_ENV
-        value: production
-      - key: RECORDS_FILE
-        value: /var/data/records.json
-      - key: APP_PASSWORD
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
         sync: false
