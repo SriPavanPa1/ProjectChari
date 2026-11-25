@@ -7,6 +7,7 @@ This React app is deployed as a static site and connects directly to Supabase us
 The app expects your existing `public.contact_records` table to have `id`, `name`, `address`, `phone_number`, and `comments` columns. Run the updated [`supabase/schema.sql`](./supabase/schema.sql) in **Supabase → SQL Editor → New query**. It:
 
 - Enables RLS and lets every signed-in user read, add, edit, and delete all records.
+- Adds `created_at` and `updated_at` timestamps. The database sets both on creation; edits preserve `created_at` and refresh `updated_at`.
 - Adds the database function used for duplicate-safe Excel imports.
 
 Before running the SQL, create an email/password user for each person who should use the app under **Authentication → Users → Add user**. Run the full script; it no longer requires a particular email address. Existing rows remain available to all signed-in users.

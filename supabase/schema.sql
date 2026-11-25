@@ -6,11 +6,29 @@ create table if not exists public.contact_records (
   address text not null default '',
   phone_number text not null default '',
   comments text not null default '',
-  owner_id uuid references auth.users(id) on delete set null
+  owner_id uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
 alter table public.contact_records
   add column if not exists owner_id uuid;
+
+alter table public.contact_records
+  add column if not exists created_at timestamptz default now(),
+  add column if not exists updated_at timestamptz default now();
+
+update public.contact_records
+   set created_at = coalesce(created_at, now()),
+       updated_at = coalesce(updated_at, created_at, now())
+ where created_at is null
+    or updated_at is null;
+
+alter table public.contact_records
+  alter column created_at set default now(),
+  alter column created_at set not null,
+  alter column updated_at set default now(),
+  alter column updated_at set not null;
 
 alter table public.contact_records
   alter column owner_id drop not null;
@@ -21,6 +39,32 @@ alter table public.contact_records
 alter table public.contact_records
   add constraint contact_records_owner_id_fkey
   foreign key (owner_id) references auth.users(id) on delete set null;
+
+create or replace function public.set_contact_records_timestamps()
+returns trigger
+language plpgsql
+set search_path = pg_catalog
+as $$
+begin
+  if tg_op = 'INSERT' then
+    new.created_at := now();
+    new.updated_at := new.created_at;
+  else
+    new.created_at := old.created_at;
+    new.updated_at := now();
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists set_contact_records_timestamps
+  on public.contact_records;
+
+create trigger set_contact_records_timestamps
+  before insert or update on public.contact_records
+  for each row
+  execute function public.set_contact_records_timestamps();
 
 create unique index if not exists contact_records_id_normalized_unique
   on public.contact_records (lower(btrim(id)));

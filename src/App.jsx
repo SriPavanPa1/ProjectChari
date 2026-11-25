@@ -4,13 +4,20 @@ import { normalizeRecordId } from "./recordUtils.js";
 import { supabase, supabaseConfigError } from "./supabase.js";
 
 const FIELD_KEYS = ["id", "name", "address", "phoneNumber", "comments"];
-const DATABASE_FIELDS = "id,name,address,phone_number,comments";
+const DATE_KEYS = ["createdAt", "updatedAt"];
+const SEARCH_KEYS = [...FIELD_KEYS, ...DATE_KEYS];
+const DATABASE_FIELDS =
+  "id,name,address,phone_number,comments,created_at,updated_at";
 const COLUMNS = [
   ["id", "ID"],
   ["name", "Name"],
   ["address", "Address"],
   ["phoneNumber", "Phone Number"],
   ["comments", "Comments"],
+];
+const DATE_COLUMNS = [
+  ["createdAt", "Created"],
+  ["updatedAt", "Last updated"],
 ];
 const HEADER_ALIASES = new Map([
   ["id", "id"],
@@ -39,7 +46,15 @@ function fromDatabaseRecord(record) {
     address: record.address,
     phoneNumber: record.phone_number,
     comments: record.comments,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
   };
+}
+
+function formatDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString();
 }
 
 function getDatabaseErrorMessage(error, fallback) {
@@ -211,9 +226,11 @@ function App() {
     return records
       .map((record, index) => ({ record, index }))
       .filter(({ record }) => {
-        const fields = searchField === "all" ? FIELD_KEYS : [searchField];
+        const fields = searchField === "all" ? SEARCH_KEYS : [searchField];
         return fields.some((key) =>
-          String(record[key] ?? "").toLocaleLowerCase().includes(normalizedQuery),
+          String(DATE_KEYS.includes(key) ? formatDate(record[key]) : (record[key] ?? ""))
+            .toLocaleLowerCase()
+            .includes(normalizedQuery),
         );
       });
   }, [query, records, searchField]);
@@ -575,6 +592,11 @@ function App() {
                     {label}
                   </option>
                 ))}
+                {DATE_COLUMNS.map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
@@ -584,6 +606,11 @@ function App() {
               <thead>
                 <tr>
                   {COLUMNS.map(([key, label]) => (
+                    <th key={key} scope="col">
+                      {label}
+                    </th>
+                  ))}
+                  {DATE_COLUMNS.map(([key, label]) => (
                     <th key={key} scope="col">
                       {label}
                     </th>
@@ -598,6 +625,9 @@ function App() {
                   <tr key={`${record.id}-${index}`}>
                     {FIELD_KEYS.map((key) => (
                       <td key={key}>{record[key] ?? ""}</td>
+                    ))}
+                    {DATE_COLUMNS.map(([key]) => (
+                      <td key={key}>{formatDate(record[key])}</td>
                     ))}
                     <td className="row-actions">
                       <button
